@@ -1,39 +1,36 @@
 # Want to reproduce VASP calculations from Materials Project
 
-Sometimes, we want to quickly set up a calculation from materials project and then check with the input. It is a quite tedious to do it manually by copying the files from MP and then set up calculations in your own environment. Here is a simple workflow to automate this process.
+Sometimes we want to quickly set up a calculation from Materials Project and compare with local runs. Doing this manually is tedious, so this folder provides a simple automated workflow.
 
-This folder contains `query.py`, a script to download one Materials Project entry (lowest `energy_above_hull`) for a given formula + lattice type and generate ready-to-run VASP inputs.
+This folder contains `query.py`, a script that downloads one Materials Project entry (lowest `energy_above_hull`) for a given formula + space-group type, then prepares ready-to-run VASP inputs.
 
 ## What `query.py` generates
 For each run, it creates a folder named:
 
-- `<formula>-<lattice_type>-<mp_id>`
+- `<formula>-<space_group>-<mp_id>-<xc_func>`
 
-Example:
+Examples:
 
-- `Gd2Co17-hexagonal-mp-1201816`
+- `Gd2Co17-hexagonal-mp-1201816-Scan`
+- `Si-cubic-mp-149-PBE`
 
 Inside that folder, it writes:
 
-- `README.md` (mp-id, DFT energy, energy above hull, XC info, POTCAR info)
+- `README.md` (mp-id, energies, XC info, POTCAR info, KSPACING status)
 - `POSCAR`
 - `INCAR` (compact MP input INCAR)
-- `KPOINTS`
+- `KPOINTS` (only when `KSPACING` is not present in INCAR)
 - `POTCAR` (assembled from your local POTCAR library)
 - `final_structure.cif`
 
+After downloading the input files, go to the desired folder (e.g. `Gd2Co17-hexagonal-mp-1201816-Scan`):
 
-After downloading the input files, go to the desired folder (e.g, ``Gd2Co17-hexagonal-mp-1201816``)
-
-```
-cd Gd2Co17-hexagonal-mp-1201816
+```bash
+cd Gd2Co17-hexagonal-mp-1201816-Scan
 sbatch ../job.sh
 ```
 
-This way, you can easily check if the output energy is consisetent with your results and play with the INCAR/POTCAR/KPOINTS files for a better comparison.
-
-
-To enable this function, do the followings
+This way, you can check whether local output energies are consistent and then tune INCAR/POTCAR/KPOINTS settings if needed.
 
 ## 1) Prerequisites
 
@@ -43,9 +40,9 @@ Activate your Python environment and install dependencies:
 pip install mp-api pymatgen
 ```
 
-## 2) Modify the slurm script
-Modify the `job.sh` file according to your own environment.
+## 2) Modify the Slurm script
 
+Modify `job.sh` according to your environment.
 
 ## 3) Set up your Materials Project API key
 
@@ -67,12 +64,12 @@ Check:
 echo $MP_API_KEY
 ```
 
-## 3) Run the script
+## 4) Run the script
 
 From the root folder:
 
 ```bash
-python query.py --formula Gd2Co17 --space-group-type hexagonal
+python query.py --formula Gd2Co17 --space-group-type hexagonal --xc scan
 ```
 
 Optional explicit POTCAR path (default is already set to your cluster path):
@@ -81,5 +78,22 @@ Optional explicit POTCAR path (default is already set to your cluster path):
 python query.py \
   --formula Gd2Co17 \
   --space-group-type hexagonal \
+  --xc scan \
   --potcar-root /projects/mmi/potcarFiles/VASP5.2/potpaw_PBE/
 ```
+
+## CLI options
+
+- `--formula`, `-f`: chemical formula (e.g., `Si`, `Gd2Co17`)
+- `--space-group-type`, `-s`: crystal system filter (e.g., `cubic`, `hexagonal`)
+- `--xc`: target XC family: `auto` (default), `gga`, or `scan`
+- `--potcar-root`: local POTCAR root path
+- `--api-key`: MP API key (defaults to `MP_API_KEY` env var)
+
+If no task matches the requested XC family (`--xc gga` or `--xc scan`), the script exits with a clear error.
+
+## Notes
+
+- Generated per-material README includes: mp-id, DFT-energy (eV/atom), total-energy (eV/cell), energy above hull, XC functional, and POTCAR info.
+- Total energy is computed as: `DFT-energy (eV/atom) * nsites`.
+- If `KSPACING` is present in INCAR, `KPOINTS` is intentionally not written.

@@ -13,7 +13,7 @@ This script:
 
 Usage:
     export MP_API_KEY="<your_api_key>"
-    python query.py --formula Gd2Co17 --space-group-type hexagonal --potcar-root /projects/mmi/potcarFiles/VASP5.2/potpaw_PBE/
+    python query.py --formula Gd2Co17 --space-group-type hexagonal --xc scan --potcar-root /projects/mmi/potcarFiles/VASP5.2/potpaw_PBE/
 """
 
 from __future__ import annotations
@@ -101,6 +101,122 @@ def pick_representative_task_id(summary_doc: Any) -> str | None:
     return None
 
 
+def sanitize_tag(value: Any) -> str:
+    text = str(value).strip()
+    if not text:
+        return "NA"
+    cleaned = []
+    for ch in text:
+        if ch.isalnum() or ch in {"-", "_", "."}:
+            cleaned.append(ch)
+        elif ch.isspace() or ch in {"=", "/", "(", ")", ":", ";", ","}:
+            cleaned.append("-")
+    result = "".join(cleaned).strip("-")
+    while "--" in result:
+        result = result.replace("--", "-")
+    return result or "NA"
+
+
+def extract_xc_info(task_doc: Any | None) -> tuple[str, str, Any]:
+    xc_display = "N/A (not returned by this task document)"
+    xc_tag = "NA"
+    potcar_info = None
+
+    if task_doc is None:
+        return xc_display, xc_tag, potcar_info
+
+    task_input = getattr(task_doc, "input", None)
+    potcar_info = getattr(task_input, "potcar_spec", None)
+
+    orig_inputs = getattr(task_doc, "orig_inputs", None)
+    orig_incar = getattr(orig_inputs, "incar", None) if orig_inputs is not None else None
+    if isinstance(orig_incar, dict):
+        meta_gga = orig_incar.get("METAGGA")
+        gga = orig_incar.get("GGA")
+        if meta_gga and str(meta_gga).strip() not in {"", "--", "None"}:
+            xc_display = f"METAGGA={meta_gga} (from orig_inputs.incar)"
+            xc_tag = sanitize_tag(meta_gga)
+            return xc_display, xc_tag, potcar_info
+        if gga and str(gga).strip() not in {"", "--", "None"}:
+            xc_display = f"GGA={gga} (from orig_inputs.incar)"
+            xc_tag = sanitize_tag(gga)
+            return xc_display, xc_tag, potcar_info
+
+    parameters = getattr(task_input, "parameters", None)
+    if isinstance(parameters, dict):
+        meta_gga = parameters.get("METAGGA")
+        gga = parameters.get("GGA")
+        if meta_gga and str(meta_gga).strip() not in {"", "--", "None"}:
+            xc_display = f"METAGGA={meta_gga} (from input.parameters)"
+            xc_tag = sanitize_tag(meta_gga)
+            potcar_info = getattr(task_input, "potcar_spec", None)
+            return xc_display, xc_tag, potcar_info
+        if gga and str(gga).strip() not in {"", "--", "None"}:
+            xc_display = f"GGA={gga} (from input.parameters)"
+            xc_tag = sanitize_tag(gga)
+            potcar_info = getattr(task_input, "potcar_spec", None)
+            return xc_display, xc_tag, potcar_info
+    elif hasattr(parameters, "get"):
+        meta_gga = parameters.get("METAGGA")
+        gga = parameters.get("GGA")
+        if meta_gga and str(meta_gga).strip() not in {"", "--", "None"}:
+            xc_display = f"METAGGA={meta_gga} (from input.parameters)"
+            xc_tag = sanitize_tag(meta_gga)
+            potcar_info = getattr(task_input, "potcar_spec", None)
+            return xc_display, xc_tag, potcar_info
+        if gga and str(gga).strip() not in {"", "--", "None"}:
+            xc_display = f"GGA={gga} (from input.parameters)"
+            xc_tag = sanitize_tag(gga)
+            potcar_info = getattr(task_input, "potcar_spec", None)
+            return xc_display, xc_tag, potcar_info
+
+    potcar_info = getattr(task_input, "potcar_spec", None)
+    if potcar_info:
+        potcar_text = " ".join(str(getattr(spec, "titel", "")) for spec in potcar_info).upper()
+        if "PBE" in potcar_text:
+            return "PBE (inferred from POTCAR titel)", "PBE", potcar_info
+        if "LDA" in potcar_text:
+            return "LDA (inferred from POTCAR titel)", "LDA", potcar_info
+
+    return xc_display, xc_tag, potcar_info
+
+
+def xc_class(task_doc: Any | None) -> str:
+    if task_doc is None:
+        return "unknown"
+
+    xc_display, xc_tag, _ = extract_xc_info(task_doc)
+    combined = f"{xc_display} {xc_tag}".lower()
+
+    if "scan" in combined:
+        return "scan"
+
+    if any(token in combined for token in ["pbe", "gga", "lda", "pe", "ps", "pw91"]):
+        return "gga"
+
+    return "unknown"
+
+
+def pick_task_for_xc(task_docs: list[Any], requested_xc: str) -> Any | None:
+    if not task_docs:
+        return None
+
+    if requested_xc == "auto":
+        with_potcar = [
+            doc for doc in task_docs if getattr(getattr(doc, "input", None), "potcar_spec", None)
+        ]
+        return with_potcar[0] if with_potcar else task_docs[0]
+
+    matches = [doc for doc in task_docs if xc_class(doc) == requested_xc]
+    if not matches:
+        return None
+
+    with_potcar = [
+        doc for doc in matches if getattr(getattr(doc, "input", None), "potcar_spec", None)
+    ]
+    return with_potcar[0] if with_potcar else matches[0]
+
+
 def write_readme(
     out_dir: Path,
     summary_doc: Any,
@@ -120,32 +236,7 @@ def write_readme(
     if dft_energy is not None and nsites is not None:
         total_energy = dft_energy * nsites
 
-    xc_functional = None
-    potcar_info = None
-
-    if task_doc is not None:
-        task_input = getattr(task_doc, "input", None)
-        xc_functional = getattr(task_input, "xc_override", None)
-        if not xc_functional:
-            parameters = getattr(task_input, "parameters", None)
-            if isinstance(parameters, dict):
-                xc_functional = parameters.get("GGA") or parameters.get("METAGGA")
-            elif hasattr(parameters, "get"):
-                xc_functional = parameters.get("GGA") or parameters.get("METAGGA")
-
-        potcar_info = getattr(task_input, "potcar_spec", None)
-
-        if not xc_functional and potcar_info:
-            potcar_text = " ".join(
-                str(getattr(spec, "titel", "")) for spec in potcar_info
-            ).upper()
-            if "PBE" in potcar_text:
-                xc_functional = "PBE (inferred from POTCAR titel)"
-            elif "LDA" in potcar_text:
-                xc_functional = "LDA (inferred from POTCAR titel)"
-
-    if xc_functional is None:
-        xc_functional = "N/A (not returned by this task document)"
+    xc_functional, _, potcar_info = extract_xc_info(task_doc)
 
     if potcar_info is None:
         potcar_text = "N/A (not returned by this task document)"
@@ -380,6 +471,13 @@ def main() -> None:
         default="/projects/mmi/potcarFiles/VASP5.2/potpaw_PBE/",
         help="Root directory containing VASP POTCAR folders",
     )
+    parser.add_argument(
+        "--xc",
+        default="auto",
+        choices=["auto", "gga", "scan"],
+        help="Target XC family for task selection: auto, gga, or scan",
+    )
+    
     args = parser.parse_args()
 
     if not args.api_key:
@@ -405,42 +503,46 @@ def main() -> None:
         )
         material_id = str(target_doc.material_id)
 
-        task_doc = None
+        task_docs_all: list[Any] = []
+
         task_id = pick_representative_task_id(target_doc)
         if task_id is not None:
-            task_docs = mpr.materials.tasks.search(task_ids=[str(task_id)], fields=TASK_FIELDS)
-            if task_docs:
-                task_doc = task_docs[0]
+            preferred_docs = mpr.materials.tasks.search(task_ids=[str(task_id)], fields=TASK_FIELDS)
+            task_docs_all.extend(preferred_docs)
 
-        if task_doc is None:
-            fallback_task_ids = [str(tid) for tid in (getattr(target_doc, "task_ids", None) or [])]
-            if fallback_task_ids:
-                task_docs = mpr.materials.tasks.search(task_ids=fallback_task_ids, fields=TASK_FIELDS)
-                with_potcar = [
-                    doc
-                    for doc in task_docs
-                    if getattr(getattr(doc, "input", None), "potcar_spec", None) is not None
-                ]
-                if with_potcar:
-                    task_doc = with_potcar[0]
-                elif task_docs:
-                    task_doc = task_docs[0]
+        fallback_task_ids = [str(tid) for tid in (getattr(target_doc, "task_ids", None) or [])]
+        if fallback_task_ids:
+            fallback_docs = mpr.materials.tasks.search(task_ids=fallback_task_ids, fields=TASK_FIELDS)
+            seen = {str(getattr(doc, "task_id", "")) for doc in task_docs_all}
+            for doc in fallback_docs:
+                doc_id = str(getattr(doc, "task_id", ""))
+                if doc_id not in seen:
+                    task_docs_all.append(doc)
+                    seen.add(doc_id)
+
+        task_doc = pick_task_for_xc(task_docs_all, args.xc)
+        if args.xc != "auto" and task_doc is None:
+            raise SystemExit(
+                f"No task with XC='{args.xc}' found for {args.formula} ({material_id})."
+            )
 
         kpoints_task_doc = task_doc
         if not task_has_kpoints(kpoints_task_doc):
-            fallback_task_ids = [str(tid) for tid in (getattr(target_doc, "task_ids", None) or [])]
-            if fallback_task_ids:
-                task_docs_for_kpoints = mpr.materials.tasks.search(
-                    task_ids=fallback_task_ids,
-                    fields=TASK_FIELDS,
-                )
-                with_kpoints = [doc for doc in task_docs_for_kpoints if task_has_kpoints(doc)]
-                if with_kpoints:
+            with_kpoints = [doc for doc in task_docs_all if task_has_kpoints(doc)]
+            if with_kpoints:
+                if args.xc == "auto":
                     kpoints_task_doc = with_kpoints[0]
+                else:
+                    with_kpoints_xc = [doc for doc in with_kpoints if xc_class(doc) == args.xc]
+                    if with_kpoints_xc:
+                        kpoints_task_doc = with_kpoints_xc[0]
+                    else:
+                        kpoints_task_doc = with_kpoints[0]
 
     formula_tag = args.formula.replace(" ", "")
     space_group_tag = args.space_group_type.lower().replace(" ", "-")
-    output_dir = Path(f"{formula_tag}-{space_group_tag}-{material_id}").resolve()
+    _, xc_tag, _ = extract_xc_info(task_doc)
+    output_dir = Path(f"{formula_tag}-{space_group_tag}-{material_id}-{xc_tag}").resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     incar_params = None
